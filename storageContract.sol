@@ -1,125 +1,118 @@
 pragma solidity >=0.7.0 <0.9.0;
-import "./ownable.sol";
+import "./storagePool.sol";
 
+contract StorageContract {
+    address public generatorAddress;
+    address public minter;
+    uint public gbCoinCirculationSupply;
+    uint public createdTime;
+    
+    mapping (uint => address) public poolToOwner;
+    mapping (address => uint) public gbBalances;
+    mapping (address => uint) public usdtBalances;
+    
+    StoragePool[] public storagePools;
+    
+    event SentGb(address from, address to, uint amount);
+    event SentUsdt(address from, address to, uint amount);
+    
+    
+    modifier onlyMinter {
+        require(msg.sender == minter);
+        _;
+    }
+    modifier amountGreaterThan(uint amount) {
+        require(amount < 1e60);
+        _;
+    }
+    
+    constructor() {
+        minter = msg.sender;
+        createdTime = block.timestamp;
+        gbCoinCirculationSupply = 0;
+        uint nonce = 1;
+        generatorAddress = address(uint160(uint(keccak256(abi.encodePacked(nonce, blockhash(block.number))))));
+    }
+    
+    function mintGb(address receiver, uint amount) public amountGreaterThan(amount) {
+        require(msg.sender == minter);
+        require(amount < 1e60);
+        gbBalances[receiver] += amount;
+        gbCoinCirculationSupply += amount;
+    }
+    
+    function sendGb(address receiver, uint amount) public {
+        require(amount <= gbBalances[msg.sender], "Insufficient Gigabytes balance.");
+        gbBalances[msg.sender] -= amount;
+        gbBalances[receiver] += amount;
+        emit SentGb(msg.sender, receiver, amount);
+    }
+    
+    function sendUsdt(address receiver, uint amount) public {
+        require(amount <= usdtBalances[msg.sender], "Insufficient Usdt balance.");
+        usdtBalances[msg.sender] -= amount;
+        usdtBalances[receiver] += amount;
+        emit SentUsdt(msg.sender, receiver, amount);
+    }
+    function sendUsdtFrom(address sender, address receiver, uint amount) public {
+        require(amount <= usdtBalances[sender], "Insufficient Usdt balance.");
+        usdtBalances[sender] -= amount;
+        usdtBalances[receiver] += amount;
+        emit SentUsdt(sender, receiver, amount);
+    }
+    
 
-
-contract StoragePool is Ownable{
-    address poolAddress;
-    uint lockedGb;
-    uint expirationDate; // given in days for example '= 30 days'
-    uint lockedUsdt;
-    uint availableGb;
-    uint fee;
-    uint createdPoolDate;
-    uint nonce = 1;
-    event newStorageLoan(uint loanId, address owner, uint lockedFee, uint borrowedGb, uint expirationDate);
-    
-    event Sent(address from, address to, uint amount);
-    
-    struct StorageLoan {
-        address owner;
-        uint lockedFee;
-        uint borrowedGb;
-        uint expirationDate;
-        uint createdLoanDate;
-        
-       
+    function generateStorageContract(uint gbCoinAmount, uint contractExpirationTime) public returns (StoragePool){
+        require(gbCoinAmount <= gbBalances[msg.sender], "Insufficient Gigabytes available");
+        require(gbCoinAmount > 0, "Positive number of Gigabytes required");
+        require(contractExpirationTime>block.timestamp, "Time must be in the future");
+        StoragePool lendContract = new StoragePool(gbCoinAmount, contractExpirationTime);
+        storagePools.push(lendContract);
+        uint id = storagePools.length - 1;
+        poolToOwner[id] = msg.sender;
+        return lendContract;
     }
     
-    StorageLoan[] public storageLoans;
-    
-    mapping (uint => address) loanToOwner;
-    mapping (address => uint) ownerLoanCount;
-    
-    constructor(uint _lockedGb, uint _expirationDate) public {
-        poolAddress = address(uint160(uint(keccak256(abi.encodePacked(nonce, blockhash(block.number))))));
-        nonce += 1;
-        lockedGb = _lockedGb;
-        expirationDate = _expirationDate;
-        lockedUsdt = 0;
-        availableGb = _lockedGb;
-        fee = 1; // fee for 1 GB in Usdt;
-        createdPoolDate = block.timestamp; //current time in seconds
-    }
-    function _getPoolAddress() public view returns(address) {
-        return poolAddress;
+    function borrowStorageFromPool(uint poolId, uint amount, uint loanTime) public {
+        require(isPoolAvailable(poolId), "Storage Pool unavailable");
+        require(storagePools[poolId]._getAvailableGb() >= amount, "Insufficient Gigabytes available in Storage Pool");
+        require(storagePools[poolId]._loanTimeAvailable(loanTime), "There is not enought time available for your loan");
+        storagePools[poolId]._createStorageLoan(amount, loanTime);
+        sendGb(storagePools[poolId]._getPoolAddress(), amount);
+        sendUsdt(storagePools[poolId]._getPoolAddress(), amount * storagePools[poolId]._getFee());
+        emit SentGb(msg.sender, storagePools[poolId]._getPoolAddress(), amount);
+        emit SentUsdt(msg.sender, storagePools[poolId]._getPoolAddress(), amount * storagePools[poolId]._getFee());
     }
     
-    
-    function _getAvailableGb() public view returns(uint) {
-        return availableGb;
+    function isPoolAvailable(uint poolId) public view returns (bool){
+        return !storagePools[poolId]._PoolExpired();
     }
     
-    function _getFee() public view returns(uint) {
-        return fee;
-    }
-    
-    function _getExpirationDate() public view returns(uint) {
-        return expirationDate;
-    }
-    function _getStorageLoansSize() public view returns(uint) {
-        return storageLoans.length;
-    }
-    function _getStorageLoan(uint _id) public view returns(StorageLoan memory){
-        return storageLoans[_id];
-    }
-    function _getStorageLoan(address _owner) public view returns(StorageLoan memory){
-        require(ownerLoanCount[_owner] >= 1, "Owner has no loans.");
-        for (uint i = 0; i < storageLoans.length; i++) {
-            if(storageLoans[i].owner == _owner){
-                return storageLoans[i];
+    function payFeeFromPool(uint poolId) public {
+        if (storagePools[poolId]._PoolExpired()) {
+            for (uint i = 0; i < storagePools[poolId]._getStorageLoansSize(); i++) {
+                sendUsdtFrom(storagePools[poolId]._getPoolAddress(), storagePools[poolId].owner(), storagePools[poolId]._getStorageLoan(i).lockedFee);
+                emit SentUsdt(storagePools[poolId]._getPoolAddress(), storagePools[poolId].owner(), storagePools[poolId]._getStorageLoan(i).lockedFee);
             }
         }
     }
     
-    function _setExpirationDate(uint _expirationDate) public onlyOwner{
-        expirationDate = _expirationDate;
-    }
-    function _expandStorage(uint _newGb) public onlyOwner{
-        require(msg.sender == owner());
-        lockedGb = lockedGb + _newGb;
-        availableGb = availableGb + _newGb;
-    }
-    function _decreaseAvailableGb(uint Gb) internal {
-        availableGb = availableGb - Gb;
+    function addGbToStoragePool(uint poolId, uint amount) public {
+        require(gbBalances[msg.sender] >= amount, "Insufficient Gigabytes available");
+        require(storagePools[poolId].owner() == msg.sender, "Only the owner of the Storage Pool can extend the storage space.");
+        storagePools[poolId]._expandStorage(amount);
     }
     
-    
-    function _createStorageLoan(uint _borrowedGb, uint _expirationDate) external {
-        require(!_PoolExpired(), "Storage Pool has expired.");
-        require(_borrowedGb <= availableGb, "Insufficient Storage Available");
-        uint _lockedFee = _borrowedGb * fee;
-        storageLoans.push(StorageLoan(msg.sender, _lockedFee, _borrowedGb, _expirationDate, block.timestamp));
-        uint id = storageLoans.length - 1; //unchecked
-        loanToOwner[id] = msg.sender;
-        ownerLoanCount[msg.sender] = ownerLoanCount[msg.sender] + 1; //unchecked
-        _decreaseAvailableGb(_borrowedGb);
-        emit newStorageLoan(id, msg.sender, _lockedFee, _borrowedGb, _expirationDate);
+    function addGbToStorageLoan(uint poolId, uint amount) public {
+        require(isPoolAvailable(poolId), "Storage pool unavailable");
+        require(gbBalances[msg.sender] >= amount, "Insufficient Gigabytes available");
+        require(usdtBalances[msg.sender] >= amount * storagePools[poolId]._getFee(), "Insufficient usdt available");
+        storagePools[poolId]._increaseLoan(amount);
+        sendUsdt(storagePools[poolId]._getPoolAddress(), amount * storagePools[poolId]._getFee());
+        emit SentUsdt(msg.sender, storagePools[poolId]._getPoolAddress(), amount * storagePools[poolId]._getFee());
     }
-    
-    function _PoolExpired() public view returns(bool) { 
-        return (block.timestamp >= (createdPoolDate + expirationDate));
-    }
-    
-    function _loanTimeAvailable(uint time) public view returns(bool) {
-        return (time <= (block.timestamp + expirationDate));
-    }
-     
-    function _LoanExpired(uint loanId) public view returns(bool){
-        return (block.timestamp >= (storageLoans[loanId].createdLoanDate + storageLoans[loanId].expirationDate));
-    }
-    
-    function _increaseLoan(uint _borrowedGb) view external {
-        require(msg.sender == _getStorageLoan(msg.sender).owner, "Only the owner can increase his loan");
-        require(lockedGb >= availableGb + _borrowedGb);
-        _getStorageLoan(msg.sender).borrowedGb += _borrowedGb;
-        _getStorageLoan(msg.sender).lockedFee += _borrowedGb * fee;
-    }
-    
-    function _extendLoan(uint _time) public view {
-        require(msg.sender == _getStorageLoan(msg.sender).owner, "Only the owner can extend his loan");
-        require(_loanTimeAvailable(_time), "The Storage Pool will expire soon");
-        _getStorageLoan(msg.sender).expirationDate += _time;
-
+    function extendStorageLoanTime(uint poolId, uint time) public view {
+        require(isPoolAvailable(poolId), "Storage pool unavailable");
+        storagePools[poolId]._extendLoan(time);
     }
 }
