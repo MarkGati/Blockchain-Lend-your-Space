@@ -1,12 +1,11 @@
+// SPDX-License-Identifier: MIT
 pragma solidity >=0.7.0 <0.9.0;
 import "./ownable.sol";
-
-
 
 contract StoragePool is Ownable{
     address poolAddress;
     uint lockedGb;
-    uint expirationDate; // given in days for example '= 30 days'
+    uint expirationDate; 
     uint lockedUsdt;
     uint availableGb;
     uint fee;
@@ -22,7 +21,6 @@ contract StoragePool is Ownable{
         uint borrowedGb;
         uint expirationDate;
         uint createdLoanDate;
-        
        
     }
     
@@ -31,11 +29,11 @@ contract StoragePool is Ownable{
     mapping (uint => address) loanToOwner;
     mapping (address => uint) ownerLoanCount;
     
-    constructor(uint _lockedGb, uint _expirationDate) public {
+    constructor(uint _lockedGb, uint _expirationDate) Ownable(msg.sender){
         poolAddress = address(uint160(uint(keccak256(abi.encodePacked(nonce, blockhash(block.number))))));
         nonce += 1;
         lockedGb = _lockedGb;
-        expirationDate = _expirationDate;
+        expirationDate = _expirationDate * 1 days;
         lockedUsdt = 0;
         availableGb = _lockedGb;
         fee = 1; // fee for 1 GB in Usdt;
@@ -72,15 +70,14 @@ contract StoragePool is Ownable{
         }
     }
     
-    function _setExpirationDate(uint _expirationDate) public onlyOwner{
+    function _setExpirationDate(uint _expirationDate) internal onlyOwner{
         expirationDate = _expirationDate;
     }
-    function _expandStorage(uint _newGb) public onlyOwner{
-        require(msg.sender == owner());
+    function _expandStorage(uint _newGb) external onlyOwner{
         lockedGb = lockedGb + _newGb;
         availableGb = availableGb + _newGb;
     }
-    function _decreaseAvailableGb(uint Gb) internal {
+    function _decreaseAvailableGb(uint Gb) private onlyOwner{
         availableGb = availableGb - Gb;
     }
     
@@ -90,9 +87,9 @@ contract StoragePool is Ownable{
         require(_borrowedGb <= availableGb, "Insufficient Storage Available");
         uint _lockedFee = _borrowedGb * fee;
         storageLoans.push(StorageLoan(msg.sender, _lockedFee, _borrowedGb, _expirationDate, block.timestamp));
-        uint id = storageLoans.length - 1; //unchecked
+        uint id = storageLoans.length - 1;
         loanToOwner[id] = msg.sender;
-        ownerLoanCount[msg.sender] = ownerLoanCount[msg.sender] + 1; //unchecked
+        ownerLoanCount[msg.sender] = ownerLoanCount[msg.sender] + 1;
         _decreaseAvailableGb(_borrowedGb);
         emit newStorageLoan(id, msg.sender, _lockedFee, _borrowedGb, _expirationDate);
     }
@@ -110,14 +107,14 @@ contract StoragePool is Ownable{
     }
     
     function _increaseLoan(uint _borrowedGb) view external {
-        require(msg.sender == _getStorageLoan(msg.sender).owner, "Only the owner can increase his loan");
+        require(ownerLoanCount[msg.sender] > 0, "Only the owner can increase this loan.");
         require(lockedGb >= availableGb + _borrowedGb);
         _getStorageLoan(msg.sender).borrowedGb += _borrowedGb;
         _getStorageLoan(msg.sender).lockedFee += _borrowedGb * fee;
     }
     
     function _extendLoan(uint _time) public view {
-        require(msg.sender == _getStorageLoan(msg.sender).owner, "Only the owner can extend his loan");
+        require(ownerLoanCount[msg.sender] > 0, "Only the owner can extend his loan.");
         require(_loanTimeAvailable(_time), "The Storage Pool will expire soon");
         _getStorageLoan(msg.sender).expirationDate += _time;
 
